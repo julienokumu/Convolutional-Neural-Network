@@ -1,11 +1,25 @@
-import torch # nn builidng
-import torch.nn as nn # nn architecture
-import torch.optim as optim # optimizer for backprop
-import torchvision # datasets and pretrained models
-import torchvision.transforms as transforms # preprocessing data
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import DataLoader # load data in batches
+import torchvision.transforms as transforms # preprocessing data
+import torchvision # datasets
+import matplotlib.pyplot as plt # image visualization
+import os # file handling
 
-# define cnn
+# save predicted image with model's label
+def save_predicted_image(image, predicted_label, number):
+    image = image.squeeze().numpy() # convert tensor to numpy array
+    plt.imshow(image, cmap="grey")
+    plt.title(f"Predicted: {predicted_label}")
+    plt.axis("off") # for better visualization
+    if not os.path.exists("predictions"):
+        os.makedirs("predictions")
+    file_path = f"predictions/prediction_{number}.png"
+    plt.savefig(file_path)
+    print(f"Prediction saved at: {file_path}")
+
+# cnn model
 class CNN(nn.Module):
     def __init__(self):
         super(CNN, self).__init__()
@@ -21,75 +35,85 @@ class CNN(nn.Module):
         # first fully connected layer
         self.fc1 = nn.Linear(64 * 7 * 7, 128)
         self.relu3 = nn.ReLU()
+        
+        # second fully connected layer, output
+        self.fc2 = nn.Linear(128, 10) # 10 neurons rep 0-9 digits
 
-        # second fully connected layer
-        self.fc2 = nn.Linear(128, 10)
-
-    # forward prop
     def forward(self, x):
-        x = self.pool(self.relu1(self.conv1(x))) # first convolution, relu and pooling
-        x = self.pool(self.relu2(self.conv2(x))) # second convolution, relu and pooling
+        x = self.pool(self.relu1(self.conv1(x))) # apply first conv, relu and pool
+        x = self.pool(self.relu2(self.conv2(x))) # apply second conv, relu and pool
         x = x.view(x.size(0), -1) # flatten tensor before feeding to nn
-        x = self.relu3(self.fc1(x)) # first fully connected layer + relu
-        x = self.fc2(x) # second fully connected layer, output
-        return x
+        x = self.relu3(self.fc1(x)) # apply first fc layer
+        x = self.fc2(x) # output layer
+        return x 
+
 
 # load mnist dataset with transformations
 transform = transforms.Compose([
-    transforms.ToTensor(), # converts images to tensors
-    transforms.Normalize((0.1307,), (0.3081,)) # normalize dataset with mean and sd
+    transforms.ToTensor(), # convert image to tensor
+    transforms.Normalize((0.1307,), (0.3081,)) # normalize image with mean and sd
 ])
 
-# download and load training data
+# download and load train and test datasets
 train_dataset = torchvision.datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-# download and load test data
 test_dataset = torchvision.datasets.MNIST(root='./data', train=False, transform=transform, download=True)
 
-# create data loaders for batch precessing
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True) # shuffle trianing data
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False) # dont shuffle tets data
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True)
 
-# gpu/cpu allocation
+# use gpu/cpu
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# initialize the cnn model to chose device
+# initialize model to chosen device
 model = CNN().to(device)
 
-# define loss function
-criterion = nn.CrossEntropyLoss() # classification tasks
-
+# loss function: crossentropyloass for classification tasks
+criterion = nn.CrossEntropyLoss()
 # optimizer
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# number of training epochs
 epochs = 5
-for epoch in range(epochs): # loop through dataset
-    model.train() # set model to training mode
-    running_loss = 0.0 # initialize loss accumulator
-    for images, labels in train_loader: # iterate over training data
-        images, labels = images.to(device), labels.to(device) # move data to gpu/cpu
-
-        optimizer.zero_grad() # zero the gradients before backprop
-        outputs = model(images) # compute predicted output, forward prop
-        loss = criterion(outputs, labels) # compute loss
-        loss.backward() # backprop, compute gradients
-        optimizer.step() # update model weights using optimizer
-
+for epoch in range(epochs):
+    model.train()
+    running_loss = 0.0 # initial running loss
+    correct = 0 # track correct prediction
+    total = 0 # total predictions
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device) # move data to appr device
+        optimizer.zero_grad() # clear previous gradients
+        outputs = model(images) # forward pass, get predicted outputs from model
+        loss = criterion(outputs, labels) # compute loss between predicted outputs and actual labels
+        loss.backward() # apply backprop
+        optimizer.step() # update model weights
         running_loss += loss.item() # accumulate loss
+        _, predicted = torch.max(outputs, 1) # get predicted labels
+        correct += (predicted == labels).sum().item() # count correct predictions
+        total += labels.size(0) # count total predictions
+    accuracy = 100 * correct / total
+    print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss/len(train_loader):.4f}, Accuracy: {accuracy:.2f}%") # print loss after each epoch
 
-    print(f"Epoch {epoch+1}, Loss: {running_loss/len(train_loader):.4f}") # print average loss for each epoch
+# save trained model to a file
+torch.save(model.state_dict(), "tritoncnn.pth")
+print("Model training complete and saved as tritoncnn.pth")
 
-# testing phase
-model.eval() # set model to evaluation mode
-correct = 0 # track number of correct peredictions
-total = 0 # track total number of test samples
+# load trained model for evaluation
+model.load_state_dict(torch.load("tritoncnn.pth", map_location=device))
+model.eval()
 
-with torch.no_grad(): # disable gradient calculation during testing
-    for images, labels in test_loader:
-        images, labels = images.to(device), labels.to(device) # move data to cpu/gpu
-        outputs = model(images) # forward pass, get model predictions
-        _, predicted = torch.max(outputs, 1) # get class with highest probability
-        total += labels.size(0) # count total test samples
-        correct += (predicted == labels).sum().item() # count correct prediction
+# take user input for testing
+number = int(input("Enter a digit(0-9) to test: "))
+indices = [i for i, (img, label) in enumerate(test_dataset) if label == number] # find indices matching images
+if not indices:
+    print("No images found for this digit")
+else:
+    index = indices[0] # take first occurence of the digit
+    image, label = test_dataset[index] # retreive image and label form dataset
+    image = image.unsqueeze(0).to(device) # add batch dimension and move to device
 
-print(f"Models Accuracy: {100 * correct / total:.2f}%")
+    with torch.no_grad(): # disable gradient computation during testing
+        output = model(image) # get model prediction
+        predicted_label = torch.argmax(output, 1).item() # get index with highest probability class
+
+    save_predicted_image(image.cpu(), predicted_label, number) # save and display predicted image
+    print(f"Actual Label: {label}, Predicted Label: {predicted_label}")
+
